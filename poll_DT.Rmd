@@ -1,0 +1,432 @@
+---
+title: "poll_DT"
+author: "Bella Shao"
+date: "5/22/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+
+library(rstan)
+library(StanHeaders)
+
+library(bayesplot)
+
+library(caret)
+library(loo)
+```
+
+
+```{r}
+raw_dt <- read.csv("approval_polllist.csv")
+str(raw_dt)
+```
+
+```{r}
+#change the date string to date time
+raw_dt$startdate <- as.Date(raw_dt$startdate, format = "%m/%d/%Y")
+raw_dt$enddate <- as.Date(raw_dt$enddate, "%m/%d/%Y")
+
+#choose date
+date_index <- raw_dt$startdate >= "2020-05-18"&raw_dt$enddate <="2020-05-24"
+poll_dt <- raw_dt[date_index,][,c("president","startdate","enddate","pollster","grade","samplesize","population","approve","disapprove")]
+
+summary(poll_dt)
+
+#change percentage points to decimals
+poll_dt[,c("approve","disapprove")] <- poll_dt[,c("approve","disapprove")]/100
+
+#calculate counts of approve and disapprove respectively by multiplying the sample size
+poll_dt$approve_counts <- as.integer(poll_dt$approve*poll_dt$samplesize)
+poll_dt$disapprove_counts <- as.integer(poll_dt$disapprove*poll_dt$samplesize)
+#the unsure counts are the people who are neither approve nor disapprove with Donald Trump. The three counts add up to the sample size for each pollster.
+poll_dt$unsure_counts <- as.integer(poll_dt$samplesize - poll_dt$approve_counts - poll_dt$disapprove_counts)
+poll_dt$samplesize <- as.integer(poll_dt$samplesize)
+poll_dt$unsure_prob <- round(poll_dt$unsure_counts/poll_dt$samplesize,2)
+poll_dt
+summary(poll_dt)
+```
+
+
+
+```{r}
+
+plot(1:nrow(poll_dt),poll_dt$approve_counts, type = "l", col = "green",ylim = c(6,2000), ylab = "Counts", xlab = "Pollster")
+lines(poll_dt$disapprove_counts, col = "red")
+lines(poll_dt$unsure_counts, col = "grey")
+legend("top", c("approve","disapprove","unsure"), col = c("green","red","grey"), lty = 1)
+
+#After adjusting to the sample size for each pollster, the graph shows that each group go with the same trend and all the trend lines are distributed along with each other. 
+#According to the distribution for each category counts, the probability of each category add up to one, which implies a potential multinomial distribution for the response variable.Thus we can propose a multinomial distribution as the likelihood for our model.
+
+```
+
+
+```{r}
+plot(poll_dt$approve, type = "l", col = "seagreen1", ylim = c(0.3,0.7), xlab = "Pollster", ylab = "Prob",main = "DT approve vs disapprove")
+lines(poll_dt$disapprove, col = "firebrick2")
+legend("topright", c("Approve","Disapprove"), col = c("seagreen1","firebrick2"), lty = 1)
+```
+
+
+
+```{r}
+#If we pool all the three different groups together, we can still see the pattern of probability distribution for each groups. Each group still shows their own variances even we pooled them all together. 
+
+#As we already decided the likelihood to be multinomial distribution, a Dirichlet probability distribution would be a good fit for the prior for the reason that each pollster has three categories and their probabilities sum up to 1. 
+
+#After deciding the prior distribution, we focus on selecting the hyper prior for our Dirichlet distribution. Since we assume the pollsters in our data set are drawn from a population, the distribution for our hyper prior could be any distribution that are suitable. A gamma distribution and normal distribution could both be good. We will check the results with both hyper priors.
+
+#pool all three categories together
+long_counts <- gather(poll_dt,condition, counts, approve_counts:unsure_counts)
+plot(long_counts$counts,type = "l", ylab = "Counts", xlab = "Pollster", col = "blue")
+
+
+#stan data
+m <- poll_dt[,c("approve_counts","disapprove_counts","unsure_counts")]
+N <- nrow(poll_dt)
+K <- 3
+a <- 2 #gamma hyper parameter
+b <- 2
+a1 <- 0 #normal hyper parameter
+b1 <- 1
+```
+
+
+
+```{r}
+#run MCMC
+poll_fit_gen <- stan("poll_DT_gen.stan", 
+                 data = list(N = N,K = K, m = m, a=a,b=b),
+                 iter = 5000,
+                 chains = 4)
+
+
+```
+
+
+```{r}
+fit_1 <- extract(poll_fit_gen)
+color_scheme_set("mix-pink-blue")
+```
+
+
+```{r}
+mcmc_acf_bar(poll_fit_gen, pars = c("p_gnt[37,3]","p_gnt[37,2]"))
+mcmc_acf_bar(poll_fit_gen, pars = c("p[1,3]","p[1,2]"))
+mcmc_acf_bar(poll_fit_gen, pars = c("alpha[3]","alpha[2]"))
+#We inspect some random parameters to check their auto correlations.It is obvious that their autocorrealtions immediately drop to zero or even below with increasing lags, which mean fast convergence of sample means to the true means. 
+
+
+
+
+#potential scale reduction factor
+
+mcmc_rhat_hist(c(rhat(poll_fit_gen)))
+
+mcmc_rhat(rhat(poll_fit_gen),size = 1)
+#Rhats measure the variances in each chain to the overall variances across all chains. In our model, all our rhats are around 1, thus all chains are at equilibrium.
+```
+
+
+```{r}
+#effective sample size n_eff
+#effective sample size is the estimate independent draws from the estimated posterior distribution without autocorrelations. The majority of our effective sample size is bigger than 0.5, which indicates our posterior works well for the modeling.
+mcmc_neff_hist(neff_ratio(poll_fit_gen))
+
+mcmc_neff(neff_ratio(poll_fit_gen))
+```
+
+```{r}
+#Diagnostics for the No-U-Turn Sampler
+
+fit1_np <- nuts_params(poll_fit_gen) #NUTS-specific diagnostic values
+fit1_lp <- log_posterior(poll_fit_gen) #log of the posterior density
+
+mcmc_nuts_acceptance(fit1_np,fit1_lp)
+
+```
+
+```{r}
+#The overview shows no divergence for our model.
+mcmc_nuts_divergence(fit1_np,fit1_lp)
+```
+
+
+
+
+```{r}
+mcmc_nuts_stepsize(fit1_np, fit1_lp)
+```
+
+```{r}
+
+mcmc_intervals(poll_fit_gen, pars = c("p[2,3]","p[1,2]", "p[3,1]","p_gnt[2,2]","p_gnt[2,1]","p_gnt[2,3]"))
+
+mcmc_intervals(poll_fit_gen, pars = c("alpha[1]", "alpha[2]","alpha[3]"))
+```
+
+
+
+
+```{r}
+color_scheme_set("mix-orange-teal")
+#we can check the "unsure" category under "p_gnt" interacting with other parameters. According to the paired plots, only the histogram of p_gnt under the "unsure" category skew to the right, all the other parameters distribute symmetrically around their means. In addition, the scatter plots of "p_gnt[37,3]" against other parameters indicate slow convergences in the funnel-like shaped scatter plots.
+mcmc_pairs(poll_fit_gen, np = fit1_np, pars = c("p[37,3]", "p_gnt[37,3]","p_gnt[37,2]","alpha[3]"),off_diag_args = list(size=0.7))
+#Thus we can investigate deeper into the parameter "p_gnt[37,3]" and the hierarchical parameter "alpha[3]"(we only investigate the "unsure" category).We transform both parameters into "unconstrained" just for allowing them to explore in the full space. As can be seen in this scatter plot, it shows a shape of Gaussian cloud, which indicates slow convergences with some over spread tails.This pattern can also be spotted between parameters p_gnt[37,3] and p[37,3]. 
+mcmc_scatter(poll_fit_gen, pars = c("alpha[3]","p_gnt[37,3]"), 
+             transformations  = list("p_gnt[37,3]" = "log", "alpha[3]"="log"),
+             np = fit1_np,
+             size=1, alpha = 0.35)
+
+mcmc_scatter(poll_fit_gen, pars = c("p[37,3]","p_gnt[37,3]"), 
+             transformations  = list("p_gnt[37,3]" = "log", "p[37,3]"="log"),
+             np = fit1_np,
+             size=1, alpha = 0.35)
+
+```
+
+
+
+
+```{r}
+mcmc_trace(poll_fit_gen, pars = c("p_gnt[37,3]","p_gnt[37,2]","p[37,3]","alpha[3]"), facet_args = list(nrow = 4))
+
+#The trace plots from random selected parameters show good convergences except for "p_gnt[37,3]", which indicates lack of sampling. When we look deeper into "p_gnt[37,3]", we found out that this parameter is bounded by zero.However, since there in no divergence to plot, it might be because the random draws from Dirichlet posterior distribution are constrained by the multinomial likelihood which requires the probabilities of each category sum up to 1. Moreover, "unsure" is strongly correlated to the other two categories. "Approve" and "Disapprove" are independent random data generated from people, however "unsure" is the sample size minus the other two categories. Thus this might also contribute to the undesirable predictions for "unsure" rates.
+mcmc_trace(poll_fit_gen,pars=c("p_gnt[37,3]"), np = fit1_np, window = c(300,400)) + xlab("Post-warmup iteration")
+```
+
+
+
+
+```{r}
+poll_fit_2 <- stan("poll_normal.stan", 
+                 data = list(N = N,K = K, m = m, a1=a1,b1=b1),
+                 iter = 5000,
+                 chains = 4)
+```
+
+
+```{r}
+color_scheme_set("mix-brightblue-teal")
+#mcmc_trace(poll_fit_2, pars = c("alpha[1]","alpha[2]","alpha[3]"), facet_args = list(nrow = 3))
+mcmc_trace(poll_fit_2, pars = c("p_gnt[37,3]","p_gnt[37,2]","p[37,1]","alpha[1]"), facet_args = list(nrow = 4))
+mcmc_acf_bar(poll_fit_2, pars = c("p_gnt[37,3]","alpha[1]","p[3,3]"))
+mcmc_trace(poll_fit_2, pars = c("p_gnt[37,3]"), window = c(300,400)) + xlab("Post-warmup iteration")
+
+mcmc_rhat(rhat(poll_fit_2))
+
+mcmc_neff(neff_ratio(poll_fit_2))
+
+
+fit2_np <- nuts_params(poll_fit_2) #NUTS-specific diagnostic values
+fit2_lp <- log_posterior(poll_fit_2) #log of the posterior density
+
+mcmc_nuts_stepsize(fit2_np,fit2_lp)
+
+
+
+```
+
+
+```{r}
+#generated data from normal hyperprior model
+normal_approve <- apply(as.data.frame(extract(poll_fit_2)$y_gen[,,1]),2,sum)/1e+06
+normal_dis <- apply(as.data.frame(extract(poll_fit_2)$y_gen[,,2]),2,sum)/1e+06
+normal_unsure <- apply(as.data.frame(extract(poll_fit_2)$y_gen[,,3]),2,sum)/1e+06
+
+plot(normal_approve, type = "l", col = "green2", ylim = c(0.3,0.7), xlab = "Pollster", ylab = "Prob", main = "normal hyperprior Generated DT approve vs disapprove")
+lines(normal_dis, col = "red2")
+legend("topright", c("Approve","Disapprove"), col = c("green2","red2"), lty = 1)
+
+#The trend lines for both approve and disapprove categories are similar to the trend lines from the original data
+```
+
+
+```{r}
+library(rstanarm)
+```
+
+```{r}
+loo1 <- loo(poll_fit_gen, save_psis = TRUE, cores = 4, pars = c("p"))
+loo2 <- loo(poll_fit_2, save_psis = TRUE, cores = 4, pars = c("p"))
+
+plot(loo(poll_fit_gen, save_psis = TRUE, cores = 4, pars = "p"))
+plot(loo(poll_fit_2, save_psis = TRUE, cores = 4, pars = "p"))
+
+
+loo_compare(loo1,loo2)
+
+
+```
+
+
+
+
+```{r}
+dim(fit_1$p_gnt[,,1])
+p_approve_mean <- apply(fit_1$p_gnt[,,1],2,mean)
+p_disapprove_mean <- apply(fit_1$p_gnt[,,2],2,mean)
+p_unsure_mean <- apply(fit_1$p_gnt[,,3],2,mean)
+#1-p_approve_mean-p_disapprove_mean
+#print(poll_fit_1, pars = "p_gnt")
+
+
+
+plot(p_approve_mean*poll_dt$samplesize, type = "l", ylim = c(0,2000), col = "seagreen", ylab = "Estimated counts", xlab = "Pollsters")
+lines(p_disapprove_mean*poll_dt$samplesize, col = "violetred1")
+lines(p_unsure_mean*poll_dt$samplesize, col = "turquoise1")
+legend("top", c("approve","disapprove","unsure"), col = c("seagreen","violetred1","turquoise1"), lty = 1)
+      
+#Based on our model, the estimated results are similar to the original counts in the dataset.The trend line for the three categories are also similar to the original ones.
+
+mean(p_approve_mean*poll_dt$samplesize >poll_dt$approve_counts)
+mean(p_disapprove_mean*poll_dt$samplesize >poll_dt$disapprove_counts)
+
+t.test(p_approve_mean*poll_dt$samplesize, poll_dt$approve_counts)
+t.test(p_disapprove_mean*poll_dt$samplesize, poll_dt$disapprove_counts)
+```
+
+
+```{r}
+#generate new data based on the posterior probability p
+```
+
+
+```{r}
+pred_approve <- apply(as.data.frame(extract(poll_fit_gen)$y_gen[,,1]),2,sum)/1e+06
+pred_dis <- apply(as.data.frame(extract(poll_fit_gen)$y_gen[,,2]),2,sum)/1e+06
+pred_unsure <- apply(as.data.frame(extract(poll_fit_gen)$y_gen[,,3]),2,sum)/1e+06
+
+```
+
+```{r}
+plot(pred_approve, type = "l", col = "mediumspringgreen", ylim = c(0.3,0.7), xlab = "Pollster", ylab = "Prob", main = "Generated DT approve vs disapprove")
+lines(pred_dis, col = "deeppink")
+legend("topright", c("Approve","Disapprove"), col = c("mediumspringgreen","deeppink"), lty = 1)
+```
+
+
+
+```{r}
+#calibration for approve category
+cali_approve <- data.frame(pred = pred_approve, obs_prob = poll_dt$approve)
+
+mutate(cali_approve, bin = ntile(pred,5)) %>%
+   group_by(bin) %>%
+   mutate(bin_pred = mean(pred), bin_obs = mean(obs_prob)) %>%
+   ungroup() %>%
+   ggplot(aes(x = bin_pred, y = bin_obs)) +
+   geom_point(color = "green") + 
+   geom_rug(aes(x = pred_approve), sides = "t") +
+   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  geom_abline(linetype = "dashed") +
+  xlab("Predicted probabilities") +
+  ylab("Observed probabilities") + 
+   ggtitle("Calibration plot for Approve") +
+   theme(plot.title = element_text(color = "green", size = 14, face = "bold.italic"))
+             
+
+
+#calibration for disapprove category
+cali_dis <- data.frame(p_dis = pred_dis, obs_dis = poll_dt$disapprove)
+
+mutate(cali_dis, bin = ntile(p_dis,5)) %>%
+   group_by(bin) %>%
+   mutate(bin_pred = mean(p_dis), bin_obs = mean(obs_dis)) %>%
+   ungroup() %>%
+   ggplot(aes(x = bin_pred, y = bin_obs)) +
+   geom_point(color = "red") + 
+   geom_rug(aes(x = pred_dis), sides = "t") +
+   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  geom_abline(linetype = "dashed") +
+  xlab("Predicted probabilities") +
+  ylab("Observed probabilities") +
+   ggtitle("Calibration plot for Disapprove") +
+   theme(plot.title = element_text(color = "red", size = 14, face = "bold.italic"))
+
+#For the two categories, both calibration plots show our predicted probabilities for each category are in conformity with the observed probabilities.
+
+```
+
+
+```{r}
+dis <- mutate(cali_dis, bin = ntile(p_dis,5)) %>%
+   group_by(bin) %>%
+   mutate(bin_pred = mean(p_dis), bin_obs = mean(obs_dis)) %>%
+   ungroup()
+
+
+
+plot(dis$bin_pred ~ dis$bin_obs, xlim = c(0,1), ylim = c(0,1), pch = 16, col = "red3", xlab = "Predicted probabilities", ylab = "Observed probabilities", main = "Calibration plot for Disapproval ratings")
+abline(reg = lm(dis$bin_obs ~ dis$bin_pred), lty = 2)
+```
+
+
+```{r}
+app <- mutate(cali_approve, bin = ntile(pred,5)) %>%
+   group_by(bin) %>%
+   mutate(bin_pred = mean(pred), bin_obs = mean(obs_prob)) %>%
+   ungroup()
+
+
+plot(app$bin_pred ~ app$bin_obs, xlim = c(0,1), ylim = c(0,1), pch = 16, col = "green3", xlab = "Predicted probabilities", ylab = "Observed probabilities", main = "Calibration plot for Approve ratings")
+abline(reg = lm(app$bin_pred ~ app$bin_obs), lty = 2)
+```
+
+
+
+
+
+```{r}
+#run ADVI
+poll_mod <- stan_model("poll_DT_gen.stan", verbose = FALSE)
+```
+
+
+```{r}
+poll_vb <- vb(object = poll_mod,
+      data = list(N = N,K = K, m = m, a=a,b=b),
+      init = 'random',
+      check_data = TRUE, 
+      algorithm = "meanfield",
+      keep_every = 1,
+      output_samples = 50000,
+      #importance_resampling = FALSE,
+      tol_rel_obj = 0.00001,
+      grad_samples = 1,
+      adapt_iter = 50
+      )
+```
+
+
+```{r}
+#get_posterior_mean(object = poll_vb, pars = c("p"))
+#get_posterior_mean(object = poll_vb, pars = c("alpha"))
+vb_mean_p_gnt <- get_posterior_mean(object = poll_vb, pars = c("p_gnt"))
+
+
+mcmc_intervals_data(poll_vb, pars = c("p_gnt[1,3]"))
+mcmc_intervals(poll_vb, pars = c("p_gnt[1,3]"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
