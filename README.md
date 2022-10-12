@@ -2,7 +2,7 @@
 
 ## Donald Trump Approval Ratings
 
-#### In this project, we develop a bayesian mcmc simulation model to estimate Donald Trump approval ratings in 2020. 
+#### In this project, we develop a bayesian mcmc simulation model to estimate approval ratings in 2020. 
 
 #### The R markdown file "poll_DT.Rmd" contains all the code for this project.
 
