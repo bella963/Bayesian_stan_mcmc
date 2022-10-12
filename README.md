@@ -1,9 +1,9 @@
 # Bayesian MCMC simulations
 
-## Donald Trump Approval Ratings
+## Approval Ratings
 
 #### In this project, we develop a bayesian mcmc simulation model to estimate approval ratings in 2020. 
-
+ 
 #### The R markdown file "poll_DT.Rmd" contains all the code for this project.
 
 #### The file of "poll_DT_gen.stan" is the first bayesian MCMC model using gamma hyper prior.
